@@ -14,6 +14,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <winhttp.h>
+#include "resource.h"
 
 #include <algorithm>
 #include <array>
@@ -67,6 +68,7 @@ const std::array<std::string, 5> kPrayerJsonNames{
     "Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"};
 
 HINSTANCE g_instance{};
+HICON g_appIcon{};
 HWND g_widget{};
 HWND g_settingsWindow{};
 HWND g_cityEdit{};
@@ -566,7 +568,7 @@ void AddTrayIcon()
     g_trayData.uID = kTrayIconId;
     g_trayData.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     g_trayData.uCallbackMessage = kTrayMessage;
-    g_trayData.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    g_trayData.hIcon = g_appIcon;
     wcsncpy_s(g_trayData.szTip, _countof(g_trayData.szTip),
         UiText(L"AdhanBar - Jadwal Sholat", L"AdhanBar - Prayer Times"), _TRUNCATE);
     g_trayAdded = Shell_NotifyIconW(NIM_ADD, &g_trayData) != FALSE;
@@ -1575,12 +1577,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     g_instance = instance;
     LoadSettings();
     g_nextPrayerText = UiText(L"Memuat jadwal...", L"Loading prayer times...");
+    g_appIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APP_ICON));
+    if (!g_appIcon)
+    {
+        MessageBoxW(nullptr, UiText(L"Tidak dapat memuat ikon aplikasi.", L"Could not load the application icon."),
+            L"AdhanBar", MB_OK | MB_ICONERROR);
+        CloseHandle(mutex);
+        return 1;
+    }
 
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);
     windowClass.style = CS_HREDRAW | CS_VREDRAW;
     windowClass.lpfnWndProc = WidgetWindowProc;
     windowClass.hInstance = instance;
+    windowClass.hIcon = g_appIcon;
+    windowClass.hIconSm = g_appIcon;
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     windowClass.hbrBackground = nullptr;
     windowClass.lpszClassName = kWindowClass;

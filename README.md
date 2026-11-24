@@ -8,6 +8,7 @@ AdhanBar is a lightweight Windows taskbar widget that shows the next prayer time
 - Blinks for one minute when a prayer time arrives.
 - Runs from the system tray and places the widget in the Windows taskbar.
 - Supports Bahasa Indonesia and English; the widget, tray menu, and settings follow the selected language.
+- Uses `app.ico` for the application window and system-tray icon.
 - Lets you change the background color and transparency. `100%` makes the background fully transparent while keeping the text visible.
 - Lets you set the widget font size from 8 to 16 pt.
 - Lets you adjust the widget's horizontal position in pixels.
