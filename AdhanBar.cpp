@@ -87,7 +87,7 @@ int g_taskbarOffsetPixels{};
 int g_backgroundTransparencyPercent{12};
 int g_widgetFontSizePt{10};
 ULONGLONG g_flashUntil{};
-UiLanguage g_language{UiLanguage::Indonesian};
+UiLanguage g_language{UiLanguage::English};
 COLORREF g_backgroundColor{RGB(30, 30, 36)};
 COLORREF g_dialogBackgroundColor{RGB(30, 30, 36)};
 int g_lastNotifiedDate{};
@@ -1070,7 +1070,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         CreateSettingsControl(window, L"STATIC",
             UiText(L"Bahasa:", L"Language:"), 0, 20, 190, 145, 28, 0);
         g_languageCombo = CreateSettingsControl(window, L"COMBOBOX", L"",
-            CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 175, 188, 190, 28, kSettingsLanguageCombo);
+            CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 175, 188, 190, 72, kSettingsLanguageCombo);
         SendMessageW(g_languageCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Bahasa Indonesia"));
         SendMessageW(g_languageCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"English"));
         SendMessageW(g_languageCombo, CB_SETMINVISIBLE, 2, 0);
