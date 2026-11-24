@@ -1,8 +1,9 @@
 /build/
-/native-build/
+/native-build/*
 /CMakeFiles/
 /CMakeCache.txt
 /cmake_install.cmake
 /Makefile
 *.exe
 *.pdb
+!/native-build/AdhanBar.exe
