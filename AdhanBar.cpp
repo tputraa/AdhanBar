@@ -54,6 +54,8 @@ constexpr int kSettingsChooseColor = 2006;
 constexpr int kSettingsOpacityEdit = 2007;
 constexpr int kSettingsLanguageCombo = 2008;
 constexpr int kSettingsFontSizeEdit = 2009;
+constexpr int kSettingsCountryEdit = 2010;
+constexpr int kSettingsMethodEdit = 2011;
 
 enum class UiLanguage
 {
@@ -78,6 +80,22 @@ HWND g_opacityEdit{};
 HWND g_colorPreview{};
 HWND g_languageCombo{};
 HWND g_fontSizeEdit{};
+HWND g_countryEdit{};
+HWND g_methodEdit{};
+HWND g_cityLabel{};
+HWND g_countryLabel{};
+HWND g_methodLabel{};
+HWND g_methodHint{};
+HWND g_offsetLabel{};
+HWND g_colorLabel{};
+HWND g_transparencyLabel{};
+HWND g_languageLabel{};
+HWND g_fontSizeLabel{};
+HWND g_positionHint{};
+HWND g_transparencyHint{};
+HWND g_chooseColorButton{};
+HWND g_saveButton{};
+HWND g_cancelButton{};
 HFONT g_font{};
 NOTIFYICONDATAW g_trayData{};
 bool g_trayAdded{};
@@ -90,6 +108,8 @@ LONG g_requestGeneration{};
 int g_taskbarOffsetPixels{};
 int g_backgroundTransparencyPercent{12};
 int g_widgetFontSizePt{10};
+int g_calculationMethod{20};
+bool g_methodEnabled{true};
 ULONGLONG g_flashUntil{};
 UiLanguage g_language{UiLanguage::English};
 COLORREF g_backgroundColor{RGB(30, 30, 36)};
@@ -99,6 +119,7 @@ int g_lastNotifiedPrayer{-1};
 int g_scheduleDate{};
 int g_lastRequestDate{};
 std::wstring g_city{L"Jakarta"};
+std::wstring g_country{L"Indonesia"};
 std::wstring g_pendingCity;
 std::wstring g_settingsPath;
 std::wstring g_nextPrayerText{L"Memuat jadwal..."};
@@ -110,6 +131,11 @@ UINT g_taskbarCreatedMessage{};
 const wchar_t* UiText(const wchar_t* indonesian, const wchar_t* english)
 {
     return g_language == UiLanguage::English ? english : indonesian;
+}
+
+const wchar_t* UiTextForLanguage(UiLanguage language, const wchar_t* indonesian, const wchar_t* english)
+{
+    return language == UiLanguage::English ? english : indonesian;
 }
 
 const std::wstring& PrayerName(size_t index)
@@ -136,6 +162,9 @@ struct PrayerRequest
     LONG generation{};
     int requestDate{};
     std::wstring city;
+    std::wstring country;
+    int method{};
+    bool methodEnabled{};
     bool notifyFailure{};
 };
 
@@ -448,6 +477,72 @@ void LoadSettings()
     else
         g_settingsLoadFailed = true;
 
+    std::string country;
+    if (ReadJsonString(contents, "Country", country))
+    {
+        std::wstring loadedCountry = Utf8ToWide(country);
+        if (!loadedCountry.empty())
+            g_country = std::move(loadedCountry);
+        else
+            g_settingsLoadFailed = true;
+    }
+    else if (contents.find("\"Country\"") != std::string::npos)
+        g_settingsLoadFailed = true;
+
+    size_t methodPosition = contents.find("\"Method\"");
+    if (methodPosition != std::string::npos)
+    {
+        methodPosition = contents.find(':', methodPosition + 8);
+        if (methodPosition == std::string::npos)
+        {
+            g_settingsLoadFailed = true;
+        }
+        else
+        {
+            methodPosition = contents.find_first_not_of(" \t\r\n", methodPosition + 1);
+            if (methodPosition == std::string::npos)
+                g_settingsLoadFailed = true;
+            else if (contents.compare(methodPosition, 4, "null") == 0)
+            {
+                size_t nullEnd = contents.find_first_not_of(" \t\r\n", methodPosition + 4);
+                if (nullEnd == std::string::npos || contents[nullEnd] == ',' || contents[nullEnd] == '}')
+                    g_methodEnabled = false;
+                else
+                    g_settingsLoadFailed = true;
+            }
+            else
+            {
+                size_t methodEnd = methodPosition;
+                while (methodEnd < contents.size()
+                    && std::isdigit(static_cast<unsigned char>(contents[methodEnd])))
+                    ++methodEnd;
+                size_t delimiterPosition = contents.find_first_not_of(" \t\r\n", methodEnd);
+                bool validEnd = delimiterPosition == std::string::npos
+                    || contents[delimiterPosition] == ',' || contents[delimiterPosition] == '}';
+                if (methodEnd == methodPosition || !validEnd)
+                    g_settingsLoadFailed = true;
+                else
+                {
+                    try
+                    {
+                        int method = std::stoi(contents.substr(methodPosition, methodEnd - methodPosition));
+                        if (method < 0 || method > 99)
+                            g_settingsLoadFailed = true;
+                        else
+                        {
+                            g_calculationMethod = method;
+                            g_methodEnabled = true;
+                        }
+                    }
+                    catch (const std::exception&)
+                    {
+                        g_settingsLoadFailed = true;
+                    }
+                }
+            }
+        }
+    }
+
     int offset = 0;
     if (ReadJsonInteger(contents, "HorizontalOffsetPixels", offset))
         g_taskbarOffsetPixels = offset;
@@ -527,7 +622,9 @@ bool SaveSettings()
     }
 
     std::string contents = "{\"City\":\"" + EscapeJsonString(WideToUtf8(g_city))
-        + "\",\"HorizontalOffsetPixels\":" + std::to_string(g_taskbarOffsetPixels)
+        + "\",\"Country\":\"" + EscapeJsonString(WideToUtf8(g_country))
+        + "\",\"Method\":" + (g_methodEnabled ? std::to_string(g_calculationMethod) : "null")
+        + ",\"HorizontalOffsetPixels\":" + std::to_string(g_taskbarOffsetPixels)
         + ",\"BackgroundColor\":\"" + HexColorString(g_backgroundColor)
         + "\",\"BackgroundTransparency\":" + std::to_string(g_backgroundTransparencyPercent)
         + ",\"BackgroundOpacity\":" + std::to_string(100 - g_backgroundTransparencyPercent)
@@ -712,7 +809,8 @@ struct InternetHandle
     }
 };
 
-bool FetchPrayerSchedule(const std::wstring& city, std::array<int, 5>& minutes, std::wstring& error)
+bool FetchPrayerSchedule(const std::wstring& city, const std::wstring& country,
+    int method, bool methodEnabled, std::array<int, 5>& minutes, std::wstring& error)
 {
     InternetHandle session{WinHttpOpen(L"AdhanBar/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0)};
@@ -731,9 +829,13 @@ bool FetchPrayerSchedule(const std::wstring& city, std::array<int, 5>& minutes, 
     }
 
     std::string encodedCity = UrlEncodeCity(city);
+    std::string encodedCountry = UrlEncodeCity(country);
     std::wstring path = L"/v1/timingsByCity?city=";
     path.append(encodedCity.begin(), encodedCity.end());
-    path += L"&country=Indonesia&method=20";
+    path += L"&country=";
+    path.append(encodedCountry.begin(), encodedCountry.end());
+    if (methodEnabled)
+        path += L"&method=" + std::to_wstring(method);
     InternetHandle request{WinHttpOpenRequest(connection.value, L"GET", path.c_str(), nullptr,
         WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)};
     if (!request.value
@@ -824,7 +926,8 @@ DWORD WINAPI PrayerRequestThread(void* parameter)
     result->city = request->city;
     try
     {
-        result->success = FetchPrayerSchedule(request->city, result->minutes, result->error);
+        result->success = FetchPrayerSchedule(request->city, request->country,
+            request->method, request->methodEnabled, result->minutes, result->error);
     }
     catch (const std::exception&)
     {
@@ -859,6 +962,9 @@ void StartPrayerRequest(const std::wstring& city, bool notifyFailure = true)
     request->requestDate = CurrentDateKey();
     g_lastRequestDate = request->requestDate;
     request->city = city;
+    request->country = g_country;
+    request->method = g_calculationMethod;
+    request->methodEnabled = g_methodEnabled;
     request->notifyFailure = notifyFailure;
     g_prayerRequestInFlight = true;
 
@@ -1028,6 +1134,33 @@ HWND CreateSettingsControl(HWND parent, const wchar_t* className, const wchar_t*
     return control;
 }
 
+void UpdateSettingsLanguage(HWND window, UiLanguage language)
+{
+    SetWindowTextW(window, UiTextForLanguage(language, L"AdhanBar - Pengaturan", L"AdhanBar - Settings"));
+    SetWindowTextW(g_cityLabel, UiTextForLanguage(language, L"Nama kota:", L"City:"));
+    SetWindowTextW(g_countryLabel, UiTextForLanguage(language, L"Negara:", L"Country:"));
+    SetWindowTextW(g_methodLabel, UiTextForLanguage(language, L"Metode:", L"Method:"));
+    SetWindowTextW(g_methodHint, UiTextForLanguage(language,
+        L"0-99; kosong = tanpa metode", L"0-99; blank = omit method"));
+    SetWindowTextW(g_offsetLabel, UiTextForLanguage(language,
+        L"Geser posisi (px):", L"Position offset (px):"));
+    SetWindowTextW(g_colorLabel, UiTextForLanguage(language, L"Warna latar:", L"Background color:"));
+    SetWindowTextW(g_chooseColorButton, UiTextForLanguage(language, L"Pilih warna...", L"Choose color..."));
+    SetWindowTextW(g_transparencyLabel, UiTextForLanguage(language,
+        L"Transparansi latar (%):", L"Transparency (%):"));
+    SetWindowTextW(g_languageLabel, UiTextForLanguage(language, L"Bahasa:", L"Language:"));
+    SetWindowTextW(g_fontSizeLabel, UiTextForLanguage(language,
+        L"Ukuran font (pt):", L"Font size (pt):"));
+    SetWindowTextW(g_positionHint, UiTextForLanguage(language,
+        L"Posisi: 0 = tengah area kanan; positif ke kiri, negatif ke kanan.",
+        L"Position: 0 = center of right area; positive left, negative right."));
+    SetWindowTextW(g_transparencyHint, UiTextForLanguage(language,
+        L"100% = latar bening; 0% = solid. Teks tetap terlihat.",
+        L"100% = transparent background; 0% = solid. Text stays visible."));
+    SetWindowTextW(g_saveButton, UiTextForLanguage(language, L"Simpan", L"Save"));
+    SetWindowTextW(g_cancelButton, UiTextForLanguage(language, L"Batal", L"Cancel"));
+}
+
 HFONT CreateWidgetFont(int pointSize)
 {
     UINT dpi = GetDpiForWindow(g_widget);
@@ -1041,10 +1174,14 @@ HFONT CreateWidgetFont(int pointSize)
 void SaveSettingsFromDialog(HWND window)
 {
     wchar_t city[256]{};
+    wchar_t country[256]{};
+    wchar_t methodText[16]{};
     wchar_t offsetText[64]{};
     wchar_t transparencyText[32]{};
     wchar_t fontSizeText[16]{};
     GetWindowTextW(g_cityEdit, city, _countof(city));
+    GetWindowTextW(g_countryEdit, country, _countof(country));
+    GetWindowTextW(g_methodEdit, methodText, _countof(methodText));
     GetWindowTextW(g_offsetEdit, offsetText, _countof(offsetText));
     GetWindowTextW(g_opacityEdit, transparencyText, _countof(transparencyText));
     GetWindowTextW(g_fontSizeEdit, fontSizeText, _countof(fontSizeText));
@@ -1054,6 +1191,39 @@ void SaveSettingsFromDialog(HWND window)
             UiText(L"Pengaturan", L"Settings"), MB_OK | MB_ICONWARNING);
         SetFocus(g_cityEdit);
         return;
+    }
+
+    std::wstring newCountry = country;
+    if (newCountry.empty() || std::all_of(newCountry.begin(), newCountry.end(),
+            [](wchar_t character) { return iswspace(character) != 0; }))
+    {
+        MessageBoxW(window, UiText(L"Masukkan nama negara.", L"Enter a country."),
+            UiText(L"Pengaturan", L"Settings"), MB_OK | MB_ICONWARNING);
+        SetFocus(g_countryEdit);
+        return;
+    }
+
+    std::wstring normalizedMethod = methodText;
+    size_t methodStart = normalizedMethod.find_first_not_of(L" \t\r\n");
+    bool newMethodEnabled = methodStart != std::wstring::npos;
+    int newMethod = g_calculationMethod;
+    if (newMethodEnabled)
+    {
+        normalizedMethod = normalizedMethod.substr(methodStart,
+            normalizedMethod.find_last_not_of(L" \t\r\n") - methodStart + 1);
+        wchar_t* methodEnd = nullptr;
+        long long parsedMethod = _wcstoi64(normalizedMethod.c_str(), &methodEnd, 10);
+        if (methodEnd == normalizedMethod.c_str() || (methodEnd && *methodEnd != L'\0')
+            || parsedMethod < 0 || parsedMethod > 99)
+        {
+            MessageBoxW(window, UiText(
+                L"Metode harus berupa bilangan bulat antara 0 dan 99, atau kosong.",
+                L"Method must be a whole number from 0 to 99, or empty."),
+                UiText(L"Pengaturan", L"Settings"), MB_OK | MB_ICONWARNING);
+            SetFocus(g_methodEdit);
+            return;
+        }
+        newMethod = static_cast<int>(parsedMethod);
     }
 
     wchar_t* end = nullptr;
@@ -1116,7 +1286,13 @@ void SaveSettingsFromDialog(HWND window)
 
     std::wstring newCity = city;
     bool cityChanged = newCity != g_city;
+    bool countryChanged = newCountry != g_country;
+    bool methodChanged = newMethod != g_calculationMethod || newMethodEnabled != g_methodEnabled;
+    bool prayerSettingsChanged = cityChanged || countryChanged || methodChanged;
     UiLanguage newLanguage = languageSelection == 1 ? UiLanguage::English : UiLanguage::Indonesian;
+    g_country = std::move(newCountry);
+    g_calculationMethod = newMethod;
+    g_methodEnabled = newMethodEnabled;
     g_taskbarOffsetPixels = static_cast<int>(parsedOffset);
     g_backgroundColor = g_dialogBackgroundColor;
     g_backgroundTransparencyPercent = static_cast<int>(parsedTransparency);
@@ -1131,16 +1307,15 @@ void SaveSettingsFromDialog(HWND window)
             UiText(L"Pengaturan widget tidak dapat disimpan.", L"Could not save widget settings."), NIIF_ERROR);
 
     if (cityChanged)
-    {
         g_pendingCity = std::move(newCity);
-        StartPrayerRequest(g_pendingCity);
-    }
     else if (!g_pendingCity.empty())
     {
         g_pendingCity.clear();
         InterlockedIncrement(&g_requestGeneration);
         g_prayerRequestInFlight = false;
     }
+    if (prayerSettingsChanged)
+        StartPrayerRequest(g_pendingCity.empty() ? g_city : g_pendingCity);
     if (!AttachToTaskbar())
         ShowBalloon(L"AdhanBar",
             UiText(L"Tidak dapat memposisikan widget di taskbar.", L"Could not position the widget on the taskbar."),
@@ -1162,59 +1337,77 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
     {
     case WM_CREATE:
     {
-        CreateSettingsControl(window, L"STATIC", UiText(L"Nama kota:", L"City:"),
+        g_cityLabel = CreateSettingsControl(window, L"STATIC", UiText(L"Nama kota:", L"City:"),
             0, 20, 25, 140, 28, 0);
         const std::wstring& displayedCity = g_pendingCity.empty() ? g_city : g_pendingCity;
         g_cityEdit = CreateSettingsControl(window, L"EDIT", displayedCity.c_str(),
             ES_AUTOHSCROLL | WS_TABSTOP, 175, 25, 240, 28, kSettingsCityEdit, WS_EX_CLIENTEDGE);
-        CreateSettingsControl(window, L"STATIC", UiText(L"Geser posisi (px):", L"Position offset (px):"),
-            0, 20, 70, 145, 28, 0);
+        g_countryLabel = CreateSettingsControl(window, L"STATIC", UiText(L"Negara:", L"Country:"),
+            0, 20, 70, 140, 28, 0);
+        g_countryEdit = CreateSettingsControl(window, L"EDIT", g_country.c_str(),
+            ES_AUTOHSCROLL | WS_TABSTOP, 175, 70, 240, 28, kSettingsCountryEdit, WS_EX_CLIENTEDGE);
+        g_methodLabel = CreateSettingsControl(window, L"STATIC", UiText(L"Metode:", L"Method:"),
+            0, 20, 110, 145, 28, 0);
+        wchar_t method[16]{};
+        if (g_methodEnabled)
+            swprintf_s(method, L"%d", g_calculationMethod);
+        g_methodEdit = CreateSettingsControl(window, L"EDIT", method,
+            ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP, 175, 110, 80, 28,
+            kSettingsMethodEdit, WS_EX_CLIENTEDGE);
+        g_methodHint = CreateSettingsControl(window, L"STATIC",
+            UiText(L"0-99; kosong = tanpa metode", L"0-99; blank = omit method"),
+            0, 265, 110, 230, 28, 0);
+        g_offsetLabel = CreateSettingsControl(window, L"STATIC",
+            UiText(L"Geser posisi (px):", L"Position offset (px):"),
+            0, 20, 150, 145, 28, 0);
         wchar_t offset[32]{};
         swprintf_s(offset, L"%d", g_taskbarOffsetPixels);
         g_offsetEdit = CreateSettingsControl(window, L"EDIT", offset,
-            ES_AUTOHSCROLL | WS_TABSTOP, 175, 70, 120, 28, kSettingsOffsetEdit, WS_EX_CLIENTEDGE);
-        CreateSettingsControl(window, L"STATIC", UiText(L"Warna latar:", L"Background color:"),
-            0, 20, 110, 145, 28, 0);
+            ES_AUTOHSCROLL | WS_TABSTOP, 175, 150, 120, 28, kSettingsOffsetEdit, WS_EX_CLIENTEDGE);
+        g_colorLabel = CreateSettingsControl(window, L"STATIC", UiText(L"Warna latar:", L"Background color:"),
+            0, 20, 190, 145, 28, 0);
         g_colorPreview = CreateSettingsControl(window, L"STATIC", L"",
-            SS_OWNERDRAW, 175, 110, 44, 26, kSettingsColorPreview);
-        CreateSettingsControl(window, L"BUTTON", UiText(L"Pilih warna...", L"Choose color..."),
-            BS_PUSHBUTTON | WS_TABSTOP, 230, 108, 120, 30, kSettingsChooseColor);
-        CreateSettingsControl(window, L"STATIC", UiText(L"Transparansi latar (%):", L"Transparency (%):"),
-            0, 20, 150, 150, 28, 0);
+            SS_OWNERDRAW, 175, 190, 44, 26, kSettingsColorPreview);
+        g_chooseColorButton = CreateSettingsControl(window, L"BUTTON",
+            UiText(L"Pilih warna...", L"Choose color..."),
+            BS_PUSHBUTTON | WS_TABSTOP, 230, 188, 120, 30, kSettingsChooseColor);
+        g_transparencyLabel = CreateSettingsControl(window, L"STATIC",
+            UiText(L"Transparansi latar (%):", L"Transparency (%):"),
+            0, 20, 230, 150, 28, 0);
         wchar_t transparency[16]{};
         swprintf_s(transparency, L"%d", g_backgroundTransparencyPercent);
         g_opacityEdit = CreateSettingsControl(window, L"EDIT", transparency,
-            ES_AUTOHSCROLL | WS_TABSTOP, 175, 150, 80, 28, kSettingsOpacityEdit, WS_EX_CLIENTEDGE);
-        CreateSettingsControl(window, L"STATIC",
-            UiText(L"Bahasa:", L"Language:"), 0, 20, 190, 145, 28, 0);
+            ES_AUTOHSCROLL | WS_TABSTOP, 175, 230, 80, 28, kSettingsOpacityEdit, WS_EX_CLIENTEDGE);
+        g_languageLabel = CreateSettingsControl(window, L"STATIC",
+            UiText(L"Bahasa:", L"Language:"), 0, 20, 270, 145, 28, 0);
         g_languageCombo = CreateSettingsControl(window, L"COMBOBOX", L"",
-            CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 175, 188, 190, 72, kSettingsLanguageCombo);
+            CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 175, 268, 190, 72, kSettingsLanguageCombo);
         SendMessageW(g_languageCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Bahasa Indonesia"));
         SendMessageW(g_languageCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"English"));
         SendMessageW(g_languageCombo, CB_SETMINVISIBLE, 2, 0);
         SendMessageW(g_languageCombo, CB_SETCURSEL,
             g_language == UiLanguage::English ? 1 : 0, 0);
-        CreateSettingsControl(window, L"STATIC",
-            UiText(L"Ukuran font (pt):", L"Font size (pt):"), 0, 20, 230, 145, 28, 0);
+        g_fontSizeLabel = CreateSettingsControl(window, L"STATIC",
+            UiText(L"Ukuran font (pt):", L"Font size (pt):"), 0, 20, 310, 145, 28, 0);
         wchar_t fontSize[16]{};
         swprintf_s(fontSize, L"%d", g_widgetFontSizePt);
         g_fontSizeEdit = CreateSettingsControl(window, L"EDIT", fontSize,
-            ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP, 175, 230, 80, 28,
+            ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP, 175, 310, 80, 28,
             kSettingsFontSizeEdit, WS_EX_CLIENTEDGE);
         CreateSettingsControl(window, L"STATIC", L"8-16",
-            0, 265, 230, 60, 28, 0);
-        CreateSettingsControl(window, L"STATIC",
+            0, 265, 310, 60, 28, 0);
+        g_positionHint = CreateSettingsControl(window, L"STATIC",
             UiText(L"Posisi: 0 = tengah area kanan; positif ke kiri, negatif ke kanan.",
                 L"Position: 0 = center of right area; positive left, negative right."),
-            0, 20, 270, 475, 22, 0);
-        CreateSettingsControl(window, L"STATIC",
+            0, 20, 350, 475, 22, 0);
+        g_transparencyHint = CreateSettingsControl(window, L"STATIC",
             UiText(L"100% = latar bening; 0% = solid. Teks tetap terlihat.",
                 L"100% = transparent background; 0% = solid. Text stays visible."),
-            0, 20, 294, 475, 22, 0);
-        CreateSettingsControl(window, L"BUTTON", UiText(L"Simpan", L"Save"),
-            BS_DEFPUSHBUTTON | WS_TABSTOP, 330, 340, 78, 30, kSettingsSave);
-        CreateSettingsControl(window, L"BUTTON", UiText(L"Batal", L"Cancel"),
-            BS_PUSHBUTTON | WS_TABSTOP, 418, 340, 78, 30, kSettingsCancel);
+            0, 20, 374, 475, 22, 0);
+        g_saveButton = CreateSettingsControl(window, L"BUTTON", UiText(L"Simpan", L"Save"),
+            BS_DEFPUSHBUTTON | WS_TABSTOP, 330, 420, 78, 30, kSettingsSave);
+        g_cancelButton = CreateSettingsControl(window, L"BUTTON", UiText(L"Batal", L"Cancel"),
+            BS_PUSHBUTTON | WS_TABSTOP, 418, 420, 78, 30, kSettingsCancel);
         return 0;
     }
 
@@ -1231,6 +1424,14 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         break;
 
     case WM_COMMAND:
+        if (LOWORD(wParam) == kSettingsLanguageCombo && HIWORD(wParam) == CBN_SELCHANGE)
+        {
+            LRESULT languageSelection = SendMessageW(g_languageCombo, CB_GETCURSEL, 0, 0);
+            if (languageSelection == 0 || languageSelection == 1)
+                UpdateSettingsLanguage(window,
+                    languageSelection == 1 ? UiLanguage::English : UiLanguage::Indonesian);
+            return 0;
+        }
         if (LOWORD(wParam) == kSettingsChooseColor)
         {
             static COLORREF customColors[16]{};
@@ -1276,6 +1477,22 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         g_colorPreview = nullptr;
         g_languageCombo = nullptr;
         g_fontSizeEdit = nullptr;
+        g_countryEdit = nullptr;
+        g_methodEdit = nullptr;
+        g_cityLabel = nullptr;
+        g_countryLabel = nullptr;
+        g_methodLabel = nullptr;
+        g_methodHint = nullptr;
+        g_offsetLabel = nullptr;
+        g_colorLabel = nullptr;
+        g_transparencyLabel = nullptr;
+        g_languageLabel = nullptr;
+        g_fontSizeLabel = nullptr;
+        g_positionHint = nullptr;
+        g_transparencyHint = nullptr;
+        g_chooseColorButton = nullptr;
+        g_saveButton = nullptr;
+        g_cancelButton = nullptr;
         return 0;
     }
     return DefWindowProcW(window, message, wParam, lParam);
@@ -1307,7 +1524,7 @@ void OpenSettingsWindow()
             ? L"AdhanBar - Settings"
             : L"AdhanBar - Pengaturan",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT, CW_USEDEFAULT, 520, 410,
+        CW_USEDEFAULT, CW_USEDEFAULT, 520, 490,
         nullptr, nullptr, g_instance, nullptr);
     if (!g_settingsWindow)
     {
@@ -1323,7 +1540,7 @@ void OpenSettingsWindow()
     RECT workArea{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
     int width = MulDiv(520, static_cast<int>(dpi), 96);
-    int height = MulDiv(410, static_cast<int>(dpi), 96);
+    int height = MulDiv(490, static_cast<int>(dpi), 96);
     SetWindowPos(g_settingsWindow, HWND_TOPMOST,
         workArea.left + ((workArea.right - workArea.left) - width) / 2,
         workArea.top + ((workArea.bottom - workArea.top) - height) / 2,
