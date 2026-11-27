@@ -13,6 +13,8 @@ AdhanBar is a lightweight Windows taskbar widget that shows the next prayer time
 - Lets you set the widget font size from 8 to 16 pt.
 - Lets you adjust the widget's horizontal position in pixels.
 - Retrieves prayer times by city from the Aladhan API.
+- Retries failed schedule downloads every 30 seconds and refreshes the schedule when the local date changes.
+- Applies a selected city and saves it only after its schedule is downloaded successfully.
 
 ## Requirements
 

@@ -38,6 +38,7 @@ constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kPrayerResultMessage = WM_APP + 2;
 constexpr UINT_PTR kUpdateTimer = 1;
 constexpr UINT_PTR kFlashTimer = 2;
+constexpr UINT_PTR kPrayerRetryTimer = 3;
 constexpr int kWidgetWidthDip = 160;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kMenuToggle = 1001;
@@ -81,6 +82,7 @@ HFONT g_font{};
 NOTIFYICONDATAW g_trayData{};
 bool g_trayAdded{};
 bool g_prayerTimesLoaded{};
+bool g_prayerRequestInFlight{};
 bool g_settingsLoadFailed{};
 bool g_flashActive{};
 bool g_flashVisible{};
@@ -94,7 +96,10 @@ COLORREF g_backgroundColor{RGB(30, 30, 36)};
 COLORREF g_dialogBackgroundColor{RGB(30, 30, 36)};
 int g_lastNotifiedDate{};
 int g_lastNotifiedPrayer{-1};
+int g_scheduleDate{};
+int g_lastRequestDate{};
 std::wstring g_city{L"Jakarta"};
+std::wstring g_pendingCity;
 std::wstring g_settingsPath;
 std::wstring g_nextPrayerText{L"Memuat jadwal..."};
 std::wstring g_countdownText{L"--:--:--"};
@@ -118,6 +123,9 @@ struct PrayerResult
 {
     LONG generation{};
     bool success{};
+    bool notifyFailure{};
+    int requestDate{};
+    std::wstring city;
     std::wstring error;
     std::array<int, 5> minutes{};
 };
@@ -126,7 +134,9 @@ struct PrayerRequest
 {
     HWND window{};
     LONG generation{};
+    int requestDate{};
     std::wstring city;
+    bool notifyFailure{};
 };
 
 std::wstring Utf8ToWide(const std::string& value)
@@ -631,12 +641,61 @@ bool ParsePrayerTime(const std::string& value, int& minutes)
     return true;
 }
 
+bool AttachToTaskbar();
+
+bool ReadJsonObject(const std::string& json, const std::string& name, std::string& value)
+{
+    const std::string key = "\"" + name + "\"";
+    size_t position = json.find(key);
+    if (position == std::string::npos)
+        return false;
+    position = json.find(':', position + key.size());
+    if (position == std::string::npos)
+        return false;
+    position = json.find_first_not_of(" \t\r\n", position + 1);
+    if (position == std::string::npos || json[position] != '{')
+        return false;
+
+    size_t objectStart = position++;
+    size_t depth = 1;
+    bool inString = false;
+    bool escaped = false;
+    for (; position < json.size(); ++position)
+    {
+        char current = json[position];
+        if (inString)
+        {
+            if (escaped)
+                escaped = false;
+            else if (current == '\\')
+                escaped = true;
+            else if (current == '"')
+                inString = false;
+            continue;
+        }
+        if (current == '"')
+            inString = true;
+        else if (current == '{')
+            ++depth;
+        else if (current == '}' && --depth == 0)
+        {
+            value.assign(json, objectStart, position - objectStart + 1);
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ExtractPrayerSchedule(const std::string& json, std::array<int, 5>& minutes)
 {
+    std::string timings;
+    if (!ReadJsonObject(json, "timings", timings))
+        return false;
+
     for (size_t index = 0; index < kPrayerJsonNames.size(); ++index)
     {
         std::string value;
-        if (!ReadJsonString(json, kPrayerJsonNames[index], value)
+        if (!ReadJsonString(timings, kPrayerJsonNames[index], value)
             || !ParsePrayerTime(value, minutes[index]))
             return false;
     }
@@ -760,6 +819,9 @@ DWORD WINAPI PrayerRequestThread(void* parameter)
     std::unique_ptr<PrayerRequest> request(static_cast<PrayerRequest*>(parameter));
     std::unique_ptr<PrayerResult> result(new PrayerResult);
     result->generation = request->generation;
+    result->notifyFailure = request->notifyFailure;
+    result->requestDate = request->requestDate;
+    result->city = request->city;
     try
     {
         result->success = FetchPrayerSchedule(request->city, result->minutes, result->error);
@@ -780,22 +842,35 @@ DWORD WINAPI PrayerRequestThread(void* parameter)
     return 0;
 }
 
-void StartPrayerRequest()
+int CurrentDateKey()
+{
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    return now.wYear * 10000 + now.wMonth * 100 + now.wDay;
+}
+
+void StartPrayerRequest(const std::wstring& city, bool notifyFailure = true)
 {
     if (!g_widget)
         return;
     PrayerRequest* request = new PrayerRequest;
     request->window = g_widget;
     request->generation = InterlockedIncrement(&g_requestGeneration);
-    request->city = g_city;
+    request->requestDate = CurrentDateKey();
+    g_lastRequestDate = request->requestDate;
+    request->city = city;
+    request->notifyFailure = notifyFailure;
+    g_prayerRequestInFlight = true;
 
     HANDLE thread = CreateThread(nullptr, 0, PrayerRequestThread, request, 0, nullptr);
     if (!thread)
     {
         delete request;
-        ShowBalloon(UiText(L"Jadwal sholat tidak tersedia", L"Prayer times unavailable"),
-            UiText(L"Tidak dapat memulai permintaan jaringan.", L"Could not start the network request."),
-            NIIF_ERROR);
+        g_prayerRequestInFlight = false;
+        if (notifyFailure)
+            ShowBalloon(UiText(L"Jadwal sholat tidak tersedia", L"Prayer times unavailable"),
+                UiText(L"Tidak dapat memulai permintaan jaringan.", L"Could not start the network request."),
+                NIIF_ERROR);
         return;
     }
     CloseHandle(thread);
@@ -819,6 +894,9 @@ void StartPrayerFlash()
 
 void UpdateCountdown()
 {
+    int today = CurrentDateKey();
+    if (g_scheduleDate != today && g_lastRequestDate != today && !g_prayerRequestInFlight)
+        StartPrayerRequest(g_pendingCity.empty() ? g_city : g_pendingCity, false);
     if (!g_prayerTimesLoaded)
         return;
 
@@ -842,10 +920,10 @@ void UpdateCountdown()
 
         if (currentSeconds / 60 == g_prayerMinutes[index])
         {
-            int today = now.wYear * 10000 + now.wMonth * 100 + now.wDay;
-            if (g_lastNotifiedDate != today || g_lastNotifiedPrayer != static_cast<int>(index))
+            int currentDate = now.wYear * 10000 + now.wMonth * 100 + now.wDay;
+            if (g_lastNotifiedDate != currentDate || g_lastNotifiedPrayer != static_cast<int>(index))
             {
-                g_lastNotifiedDate = today;
+                g_lastNotifiedDate = currentDate;
                 g_lastNotifiedPrayer = static_cast<int>(index);
                 const std::wstring& prayerName = PrayerName(index);
                 std::wstring title = g_language == UiLanguage::English
@@ -879,7 +957,8 @@ void UpdateCountdown()
 
     std::wstring newPrayerText = prayerText;
     std::wstring newCountdownText = countdown;
-    bool changed = newPrayerText != g_nextPrayerText || newCountdownText != g_countdownText;
+    bool prayerChanged = newPrayerText != g_nextPrayerText;
+    bool changed = prayerChanged || newCountdownText != g_countdownText;
     g_nextPrayerText = std::move(newPrayerText);
     g_countdownText = std::move(newCountdownText);
 
@@ -892,11 +971,39 @@ void UpdateCountdown()
         tooltip.resize(127);
     UpdateTrayTooltip(tooltip);
 
+    if (prayerChanged && IsWindowVisible(g_widget))
+        AttachToTaskbar();
     if (changed && g_widget)
         InvalidateRect(g_widget, nullptr, FALSE);
 }
 
-bool AttachToTaskbar();
+int MeasureTextWidth(const std::wstring& text)
+{
+    if (!g_widget || !g_font)
+        return 0;
+    HDC dc = GetDC(g_widget);
+    if (!dc)
+        return 0;
+    HGDIOBJ previousFont = SelectObject(dc, g_font);
+    SIZE size{};
+    GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &size);
+    SelectObject(dc, previousFont);
+    ReleaseDC(g_widget, dc);
+    return size.cx;
+}
+
+int WidgetWidthPixels()
+{
+    UINT dpi = g_widget ? GetDpiForWindow(g_widget) : 96;
+    if (dpi == 0)
+        dpi = 96;
+    int minimumWidth = MulDiv(kWidgetWidthDip, static_cast<int>(dpi), 96);
+    int prayerWidth = MeasureTextWidth(g_nextPrayerText);
+    int countdownWidth = MeasureTextWidth(g_countdownText);
+    int requiredWidth = std::max((prayerWidth * 100 + 60) / 61,
+        (countdownWidth * 100 + 38) / 39) + MulDiv(12, static_cast<int>(dpi), 96);
+    return std::max(minimumWidth, requiredWidth);
+}
 
 void SetControlFont(HWND control)
 {
@@ -1010,7 +1117,6 @@ void SaveSettingsFromDialog(HWND window)
     std::wstring newCity = city;
     bool cityChanged = newCity != g_city;
     UiLanguage newLanguage = languageSelection == 1 ? UiLanguage::English : UiLanguage::Indonesian;
-    g_city = std::move(newCity);
     g_taskbarOffsetPixels = static_cast<int>(parsedOffset);
     g_backgroundColor = g_dialogBackgroundColor;
     g_backgroundTransparencyPercent = static_cast<int>(parsedTransparency);
@@ -1025,7 +1131,16 @@ void SaveSettingsFromDialog(HWND window)
             UiText(L"Pengaturan widget tidak dapat disimpan.", L"Could not save widget settings."), NIIF_ERROR);
 
     if (cityChanged)
-        StartPrayerRequest();
+    {
+        g_pendingCity = std::move(newCity);
+        StartPrayerRequest(g_pendingCity);
+    }
+    else if (!g_pendingCity.empty())
+    {
+        g_pendingCity.clear();
+        InterlockedIncrement(&g_requestGeneration);
+        g_prayerRequestInFlight = false;
+    }
     if (!AttachToTaskbar())
         ShowBalloon(L"AdhanBar",
             UiText(L"Tidak dapat memposisikan widget di taskbar.", L"Could not position the widget on the taskbar."),
@@ -1049,7 +1164,8 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
     {
         CreateSettingsControl(window, L"STATIC", UiText(L"Nama kota:", L"City:"),
             0, 20, 25, 140, 28, 0);
-        g_cityEdit = CreateSettingsControl(window, L"EDIT", g_city.c_str(),
+        const std::wstring& displayedCity = g_pendingCity.empty() ? g_city : g_pendingCity;
+        g_cityEdit = CreateSettingsControl(window, L"EDIT", displayedCity.c_str(),
             ES_AUTOHSCROLL | WS_TABSTOP, 175, 25, 240, 28, kSettingsCityEdit, WS_EX_CLIENTEDGE);
         CreateSettingsControl(window, L"STATIC", UiText(L"Geser posisi (px):", L"Position offset (px):"),
             0, 20, 70, 145, 28, 0);
@@ -1137,6 +1253,11 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             return 0;
         }
         if (LOWORD(wParam) == kSettingsCancel)
+        {
+            DestroyWindow(window);
+            return 0;
+        }
+        if (LOWORD(wParam) == IDCANCEL)
         {
             DestroyWindow(window);
             return 0;
@@ -1259,10 +1380,7 @@ bool AttachToTaskbar()
     if (!GetWindowRect(taskbar, &taskbarRect) || !GetClientRect(taskbar, &taskbarClient))
         return false;
 
-    UINT dpi = GetDpiForWindow(g_widget);
-    if (dpi == 0)
-        dpi = 96;
-    int width = MulDiv(kWidgetWidthDip, static_cast<int>(dpi), 96);
+    int width = WidgetWidthPixels();
     int height = taskbarClient.bottom - taskbarClient.top;
     HWND trayArea = FindWindowExW(taskbar, nullptr, L"TrayNotifyWnd", nullptr);
     int rightBoundary = taskbarClient.right;
@@ -1281,7 +1399,7 @@ bool AttachToTaskbar()
     int rightSectionCenter = taskbarCenter + (rightBoundary - taskbarCenter) / 2;
     int x = rightSectionCenter - width / 2 - g_taskbarOffsetPixels;
     int y = taskbarClient.top;
-    return SetWindowPos(g_widget, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW) != FALSE;
+    return SetWindowPos(g_widget, HWND_TOP, x, y, width, height, SWP_NOACTIVATE) != FALSE;
 }
 
 void ShowFallbackWidget()
@@ -1298,7 +1416,7 @@ void ShowFallbackWidget()
     UINT dpi = GetDpiForWindow(g_widget);
     if (dpi == 0)
         dpi = 96;
-    int width = MulDiv(kWidgetWidthDip, static_cast<int>(dpi), 96);
+    int width = WidgetWidthPixels();
     int height = MulDiv(26, static_cast<int>(dpi), 96);
     SetWindowPos(g_widget, HWND_TOPMOST, workArea.right - width - 8, workArea.bottom - height - 8,
         width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -1471,10 +1589,38 @@ LRESULT CALLBACK WidgetWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
             ShowFallbackWidget();
         return 0;
 
+    case WM_DPICHANGED:
+    {
+        HFONT newFont = CreateWidgetFont(g_widgetFontSizePt);
+        if (newFont)
+        {
+            HFONT previousFont = g_font;
+            g_font = newFont;
+            if (previousFont)
+                DeleteObject(previousFont);
+        }
+        else
+            ShowBalloon(UiText(L"Ukuran font gagal diperbarui.", L"Could not update the widget font."),
+                UiText(L"Ukuran font sebelumnya tetap digunakan.", L"The previous font size will remain in use."),
+                NIIF_WARNING);
+        if (!AttachToTaskbar())
+            ShowFallbackWidget();
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+    }
+
     case WM_TIMER:
         if (wParam == kUpdateTimer)
         {
             UpdateCountdown();
+            return 0;
+        }
+        if (wParam == kPrayerRetryTimer)
+        {
+            int today = CurrentDateKey();
+            if (!g_prayerRequestInFlight
+                && (!g_prayerTimesLoaded || g_scheduleDate != today || !g_pendingCity.empty()))
+                StartPrayerRequest(g_pendingCity.empty() ? g_city : g_pendingCity, false);
             return 0;
         }
         if (wParam == kFlashTimer)
@@ -1519,7 +1665,7 @@ LRESULT CALLBACK WidgetWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
             OpenSettingsWindow();
             return 0;
         case kMenuRefresh:
-            StartPrayerRequest();
+            StartPrayerRequest(g_pendingCity.empty() ? g_city : g_pendingCity);
             return 0;
         case kMenuExit:
             DestroyWindow(window);
@@ -1534,14 +1680,24 @@ LRESULT CALLBACK WidgetWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
             || result->generation != static_cast<LONG>(wParam)
             || result->generation != InterlockedCompareExchange(&g_requestGeneration, 0, 0))
             return 0;
+        g_prayerRequestInFlight = false;
         if (!result->success)
         {
-            ShowBalloon(UiText(L"Jadwal sholat tidak tersedia", L"Prayer times unavailable"),
-                LocalizePrayerError(result->error), NIIF_ERROR);
+            if (result->notifyFailure)
+                ShowBalloon(UiText(L"Jadwal sholat tidak tersedia", L"Prayer times unavailable"),
+                    LocalizePrayerError(result->error), NIIF_ERROR);
             return 0;
         }
+        bool cityChanged = g_city != result->city;
         g_prayerMinutes = result->minutes;
+        g_city = result->city;
+        if (g_pendingCity == result->city)
+            g_pendingCity.clear();
+        g_scheduleDate = result->requestDate;
         g_prayerTimesLoaded = true;
+        if (cityChanged && !SaveSettings())
+            ShowBalloon(UiText(L"Pengaturan tidak tersimpan", L"Settings not saved"),
+                UiText(L"Pengaturan widget tidak dapat disimpan.", L"Could not save widget settings."), NIIF_ERROR);
         UpdateCountdown();
         return 0;
     }
@@ -1549,6 +1705,7 @@ LRESULT CALLBACK WidgetWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
     case WM_DESTROY:
         KillTimer(window, kUpdateTimer);
         KillTimer(window, kFlashTimer);
+        KillTimer(window, kPrayerRetryTimer);
         RemoveTrayIcon();
         if (g_font)
         {
@@ -1564,6 +1721,7 @@ LRESULT CALLBACK WidgetWindowProc(HWND window, UINT message, WPARAM wParam, LPAR
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 {
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     SetLastError(ERROR_SUCCESS);
     HANDLE mutex = CreateMutexW(nullptr, TRUE, kMutexName);
     DWORD mutexError = GetLastError();
@@ -1654,13 +1812,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
     }
 
     SetTimer(g_widget, kUpdateTimer, 1000, nullptr);
+    if (!SetTimer(g_widget, kPrayerRetryTimer, 30000, nullptr))
+        ShowBalloon(UiText(L"Jadwal sholat tidak tersedia", L"Prayer times unavailable"),
+            UiText(L"Pemutakhiran otomatis tidak dapat dijadwalkan.",
+                L"Automatic schedule retries could not be scheduled."),
+            NIIF_WARNING);
     ShowWindow(g_widget, SW_SHOW);
     UpdateWindow(g_widget);
-    StartPrayerRequest();
+    StartPrayerRequest(g_city);
 
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0)
     {
+        if (g_settingsWindow && IsDialogMessageW(g_settingsWindow, &message))
+            continue;
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
